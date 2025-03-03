@@ -1,0 +1,10 @@
+[package]
+name = "dump"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.97"
+arboard = "3.4.1"
+clap = "4.5.31"
+ignore = "0.4.23"
