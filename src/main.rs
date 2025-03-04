@@ -71,7 +71,7 @@ static LANG_MAP: phf::Map<&'static str, &'static str> = phf_map! {
 };
 
 fn main() -> Result<()> {
-    let matches = Command::new("dump")
+    let matches = Command::new("codump")
         .about("dumps project files in an llm-friendly format")
         .arg(
             Arg::new("directory")
@@ -144,7 +144,7 @@ fn main() -> Result<()> {
 
     if to_clipboard {
         set_clipboard(&output).context("failed to copy output to clipboard")?;
-        println!("project dump copied to clipboard");
+        println!("Code dump copied to clipboard");
     } else {
         println!("{}", output);
     }
