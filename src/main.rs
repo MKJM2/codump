@@ -71,7 +71,7 @@ static LANG_MAP: phf::Map<&'static str, &'static str> = phf_map! {
 };
 
 fn main() -> Result<()> {
-    let matches = Command::new("codump")
+    let matches = Command::new("dumpcode")
         .about("dumps project files in an llm-friendly format")
         .arg(
             Arg::new("directory")

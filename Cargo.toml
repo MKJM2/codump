@@ -1,12 +1,12 @@
 [package]
-name = "codump"
+name = "dumpcode"
 version = "0.1.0"
 edition = "2021"
 authors = ["Michal Kurek mkurek@college.harvard.edu"]
 description = "A utility that dumps project files in an LLM-friendly format"
 license = "MIT"
 license-file = "LICENSE.md"
-repository = "https://github.com/MKJM2/codump"
+repository = "git@github.com:MKJM2/dumpcode.git"
 readme = "README.md"
 keywords = ["code", "dump", "cli", "llm", "files"]
 categories = ["command-line-utilities"]

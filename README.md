@@ -1,8 +1,8 @@
-# dump
+# dumpcode
 
-dump is a simple utility that outputs your project's files in an llm-friendly format.
-it generates a tree view of your project structure and then includes the file contents
-with syntax highlighting.
+`dumpcode` is a simple utility that outputs your project's files in an LLM-friendly format.
+It generates a tree view of your project structure and then includes the file contents
+with syntax highlighting. The output can be routed to your clipboard or to stdout.
 
 ## features
 
