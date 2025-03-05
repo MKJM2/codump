@@ -1,10 +1,13 @@
 use anyhow::{Context, Result};
 use arboard::Clipboard;
 use camino::{Utf8Path, Utf8PathBuf};
-use clap::{Arg, Command};
+use clap::Parser;
 use phf::phf_map;
 use rayon::prelude::*;
 use std::{fs, thread, time::Duration};
+use std::io::Read;
+use log::{warn, debug};
+use regex::Regex;
 use walkdir::WalkDir;
 
 static LANG_MAP: phf::Map<&'static str, &'static str> = phf_map! {
@@ -70,79 +73,85 @@ static LANG_MAP: phf::Map<&'static str, &'static str> = phf_map! {
     "org" => "org",
 };
 
-fn main() -> Result<()> {
-    let matches = Command::new("dumpcode")
-        .about("dumps project files in an llm-friendly format")
-        .arg(
-            Arg::new("directory")
-                .help("directory to scan (defaults to current)")
-                .default_value(".")
-                .index(1),
-        )
-        .arg(
-            Arg::new("clipboard")
-                .short('c')
-                .long("clipboard")
-                .help("copy output to clipboard instead of stdout")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("extensions")
-                .short('e')
-                .long("extensions")
-                .help("file extensions to include (comma-separated)")
-                .default_value("rs,py,js,ts,jsx,tsx,go,java,c,cpp,h,hpp,cs,rb,php,scala,kt,pl,sh,bash,zsh,fish,json,toml,yaml,yml,md,txt,csv,xml,sql,graphql,prisma,html,css,scss,sass,less"),
-        )
-        .arg(
-            Arg::new("max-size")
-                .short('s')
-                .long("max-size")
-                .help("max file size in kb to include")
-                .default_value("100")
-                .value_parser(clap::value_parser!(usize)),
-        )
-        .arg(
-            Arg::new("exclude")
-                .short('x')
-                .long("exclude")
-                .help("directories to exclude (comma-separated)")
-                .default_value(".git,node_modules,target,dist,build,venv,__pycache__,.idea,.vscode,bin,obj,.mypy_cache,debug,.fingerprint,.cache"),
-        )
-        .arg(
-            Arg::new("max-files")
-                .long("max-files")
-                .help("maximum number of files to include")
-                .default_value("1000")
-                .value_parser(clap::value_parser!(usize)),
-        )
-        .get_matches();
+const DEFAULT_EXTENSIONS_STR: &str = concat!(
+    "rs,py,js,ts,jsx,tsx,go,java,c,cpp,cc,cxx,",
+    "h,hpp,hxx,cs,rb,php,scala,kt,kts,groovy,pl,pm,swift,lua,",
+    "ex,exs,elm,hs,erl,fs,sh,bash,zsh,fish,ps1,json,toml,",
+    "yaml,yml,xml,ini,conf,properties,sql,graphql,gql,prisma,",
+    "md,markdown,rst,txt,csv,org,html,css,scss,sass,less,tex,",
+    "rmd,bat"
+);
 
-    let directory = matches.get_one::<String>("directory").unwrap();
-    let to_clipboard = matches.get_flag("clipboard");
-    let extensions = matches
-        .get_one::<String>("extensions")
-        .unwrap()
-        .split(',')
-        .map(|s| s.trim().to_lowercase())
-        .collect::<Vec<_>>();
-    let max_size_kb = *matches.get_one::<usize>("max-size").unwrap();
-    let exclude_dirs = matches
-        .get_one::<String>("exclude")
-        .unwrap()
-        .split(',')
-        .map(|s| s.trim())
-        .collect::<Vec<&str>>();
-    let max_files = *matches.get_one::<usize>("max-files").unwrap();
+const DEFAULT_EXCLUDES_STR: &str = concat!(
+    ".git,node_modules,target,dist,build,venv,.venv,__pycache__,",
+    ".idea,.vscode,bin,obj,.mypy_cache,debug,.fingerprint,.cache,",
+    "bower_components,coverage,tmp,temp,.next,out,logs,release,",
+    ".gradle,gradle,vendor,packages,artifacts,generated,pods,",
+    ".eggs,.pytest_cache,cmake-build-debug,cmake-build-release,",
+    "CMakeFiles,.vs,out,.ipynb_checkpoints"
+);
+
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "dumpcode",
+    about = "dumps project files in an llm-friendly format",
+    version
+)]
+struct Cli {
+    #[arg(default_value = ".", help = "directory to scan")]
+    directory: String,
+
+    #[arg(short, long, help = "copy output to clipboard")]
+    clipboard: bool,
+
+    #[arg(
+        short,
+        long,
+        default_value = DEFAULT_EXTENSIONS_STR,
+        help = "file extensions to include"
+    )]
+    extensions: String,
+
+    #[arg(short, long, default_value_t = 100, help = "max file size in kb")]
+    max_size: usize,
+
+    #[arg(
+        short = 'x',
+        long,
+        default_value = DEFAULT_EXCLUDES_STR,
+        help = "directories to exclude"
+    )]
+    exclude: String,
+
+    #[arg(long, default_value_t = 1000, help = "maximum files to include")]
+    max_files: usize,
+
+    #[arg(short, long, help = "enable debug logging")]
+    verbose: bool,
+}
+
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    env_logger::Builder::new()
+        .filter_level(if cli.verbose { log::LevelFilter::Debug } else { log::LevelFilter::Warn })
+        .init();
+
+    debug!(target: "dumpcode", "cli args: {:?}", cli);
+
+    let extensions_vec = cli.extensions.split(',').map(|s| s.trim().to_lowercase()).collect::<Vec<_>>();
+    let exclude_dirs_vec = cli.exclude.split(',').map(|s| s.trim()).collect::<Vec<_>>();
 
     let output = generate_dump(
-        directory,
-        &extensions,
-        max_size_kb,
-        &exclude_dirs,
-        max_files,
+        &cli.directory,
+        &extensions_vec,
+        cli.max_size,
+        &exclude_dirs_vec,
+        cli.max_files,
     )?;
 
-    if to_clipboard {
+    if cli.clipboard {
         set_clipboard(&output).context("failed to copy output to clipboard")?;
         println!("Code dump copied to clipboard");
     } else {
@@ -170,11 +179,24 @@ fn generate_dump(
     let files_output: Result<Vec<String>> = included_files
         .par_iter()
         .map(|relative_path| {
+            let start_time = std::time::Instant::now();
             let full_path = base.join(relative_path);
-            let content = fs::read_to_string(full_path.as_std_path())
-                .with_context(|| format!("failed to read {}", full_path))?;
+
+            let mut file = fs::File::open(full_path.as_std_path())?;
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer)?;
+
+            let content = match String::from_utf8(buffer) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("non-utf8 file skipped: {} ({})", relative_path, e);
+                    return Ok(String::new());
+                }
+            };
+
             let ext = relative_path.extension().unwrap_or("").to_lowercase();
             let lang = language_for_extension(&ext, &content);
+            debug!("processed {} in {:?}", relative_path, start_time.elapsed());
             let file_dump = format!(
                 "# file: {}\n\n```{}\n{}\n```\n\n",
                 relative_path, lang, content
@@ -206,6 +228,8 @@ fn generate_tree_view(
 
     let walker = WalkDir::new(path)
         .min_depth(1)
+        .follow_links(false)
+        .same_file_system(true)
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
@@ -214,6 +238,11 @@ fn generate_tree_view(
 
     for entry in walker {
         let entry = entry?;
+        if entry.path_is_symlink() {
+            warn!("skipping symlink: {}", entry.path().display());
+            continue;
+        }
+
         let entry_path = entry.path();
         let file_name = entry.file_name().to_string_lossy();
         let is_excluded = entry.depth() > 0 && exclude_dirs.iter().any(|d| file_name == *d);
@@ -223,6 +252,10 @@ fn generate_tree_view(
         if file_count >= max_files {
             break;
         }
+
+        let depth = entry.depth();
+        let indent = "  ".repeat(depth - 1);
+        let prefix = if depth == 1 { "├── " } else { "└── " };
         if entry.file_type().is_file() {
             let metadata = entry.metadata()?;
             let size_kb = metadata.len() / 1024;
@@ -237,15 +270,15 @@ fn generate_tree_view(
                     .and_then(|p| p.strip_prefix(path).ok())
                     .unwrap_or_else(|| Utf8Path::from_path(entry_path).unwrap())
                     .to_owned();
+                tree.push_str(&format!("{}{}{} [{}kb]\n", indent, prefix, rel_path, size_kb));
                 files.push(rel_path.clone());
-                tree.push_str(&format!("{} [{}kb]\n", rel_path, size_kb));
             }
         } else if entry.file_type().is_dir() {
             let rel_path = Utf8Path::from_path(entry_path)
                 .and_then(|p| p.strip_prefix(path).ok())
                 .unwrap_or_else(|| Utf8Path::from_path(entry_path).unwrap())
                 .to_owned();
-            tree.push_str(&format!("{}/\n", rel_path));
+            tree.push_str(&format!("{}{}{}/\n", indent, prefix, rel_path));
         }
     }
 
@@ -265,21 +298,27 @@ fn language_for_extension(ext: &str, content: &str) -> &'static str {
 }
 
 fn detect_shebang(content: &str) -> &'static str {
-    content
-        .lines()
-        .next()
-        .map(|line| {
-            if line.contains("python") {
-                "python"
-            } else if line.contains("ruby") {
-                "ruby"
-            } else if line.contains("node") {
-                "javascript"
-            } else {
-                ""
-            }
-        })
-        .unwrap_or("")
+    lazy_static::lazy_static! {
+        static ref SHEBANG_RE: Regex = Regex::new(r"^#!\s*/usr/bin/env\s+(\w+)|^#!\s*/.*/(\w+)").unwrap();
+    }
+
+    if let Some(first_line) = content.lines().next() {
+        if let Some(caps) = SHEBANG_RE.captures(first_line) {
+            let lang = caps.get(1).or_else(|| caps.get(2)).map(|m| m.as_str());
+            return match lang {
+                Some("python3") | Some("python") => "python",
+                Some("ruby") => "ruby",
+                Some("node") | Some("nodejs") => "javascript",
+                Some("bash") | Some("sh") => "bash",
+                Some("perl") => "perl",
+                Some("php") => "php",
+                Some("lua") => "lua",
+                Some("Rscript") => "r",
+                _ => "",
+            };
+        }
+    }
+    ""
 }
 
 fn detect_special_file(content: &str) -> &'static str {
